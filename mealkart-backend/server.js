@@ -1,294 +1,358 @@
 // ============================================================
-//  MEALKART BACKEND — server.js
-//  Run: node server.js
-//  Install: npm install express razorpay crypto cors dotenv xlsx node-cron axios
+//  MEALKART BACKEND — server.js  (fully updated)
+//  Install: npm install express razorpay crypto cors dotenv xlsx node-cron twilio @supabase/supabase-js
 // ============================================================
 
 require("dotenv").config();
-const express  = require("express");
-const Razorpay = require("razorpay");
-const crypto   = require("crypto");
-const cors     = require("cors");
-const xlsx     = require("xlsx");
-const fs       = require("fs");
-const path     = require("path");
-const cron     = require("node-cron");
-const axios    = require("axios");
+const express      = require("express");
+const Razorpay     = require("razorpay");
+const crypto       = require("crypto");
+const cors         = require("cors");
+const xlsx         = require("xlsx");
+const fs           = require("fs");
+const path         = require("path");
+const cron         = require("node-cron");
+const sendWhatsApp = require("./whatsapp");
+const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
-app.use(cors());
+
+// ============================================================
+// ─── 1. CORS — only allow your frontend origin
+// ============================================================
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "http://localhost:5173")
+  .split(",")
+  .map(o => o.trim());
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (Postman, curl, server-to-server)
+    if (!origin) return callback(null, true);
+    if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    callback(new Error(`CORS blocked: ${origin}`));
+  },
+  methods: ["GET", "POST"],
+  credentials: true,
+}));
+
 app.use(express.json());
 
 // ============================================================
-// ─── 1. YOUR KEYS — fill these in .env file ─────────────────
+// ─── 2. KEYS & CONFIG
 // ============================================================
-// HOW TO GET RAZORPAY KEYS:
-//   1. Go to https://dashboard.razorpay.com
-//   2. Login → Settings → API Keys → Generate Test Key
-//   3. Copy Key ID  → paste as RAZORPAY_KEY_ID below
-//   4. Copy Key Secret → paste as RAZORPAY_KEY_SECRET below
-//
-// HOW TO GET WHATSAPP API KEY (Interakt — easiest for India):
-//   1. Go to https://app.interakt.ai → Sign up free
-//   2. Connect your WhatsApp number (needs Facebook Business Manager)
-//   3. Dashboard → Developer → API Token → copy it
-//   4. Paste as WHATSAPP_API_KEY below
-// ============================================================
-
-const RAZORPAY_KEY_ID     = process.env.RAZORPAY_KEY_ID     || "rzp_test_XXXXXXXXXXXXXXXX";
-const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || "XXXXXXXXXXXXXXXXXXXXXXXX";
-const WHATSAPP_API_KEY    = process.env.WHATSAPP_API_KEY    || "your_interakt_api_key_here";
-const ADMIN_PHONE         = process.env.ADMIN_PHONE         || "919XXXXXXXXX"; // Your number with country code, no +
-
-// Excel file will be saved here on your server/computer
-const EXCEL_FILE_PATH = path.join(__dirname, "mealkart_orders.xlsx");
-
-// School → WhatsApp number map. Add your schools here.
-const SCHOOL_PHONES = {
-  "The International School Bangalore (TISB)": "918XXXXXXXXX",
-  "Inventure Academy":                          "917XXXXXXXXX",
-  "Greenwood High International School":        "919XXXXXXXXX",
-  // Add more: "School Name": "91<10-digit-number>"
-};
+const RAZORPAY_KEY_ID     = process.env.RAZORPAY_KEY_ID;
+const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
+const ADMIN_PHONE         = process.env.ADMIN_PHONE || "9566680245";
+const ADMIN_PASSWORD      = process.env.ADMIN_PASSWORD || "mealkart@admin123";
+const EXCEL_FILE_PATH     = path.join(__dirname, "mealkart_orders.xlsx");
+const IS_DEV              = process.env.NODE_ENV !== "production";
 
 // ============================================================
-// ─── 2. RAZORPAY SETUP ───────────────────────────────────────
+// ─── 3. SUPABASE
 // ============================================================
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
+);
 
+// ============================================================
+// ─── 4. RAZORPAY
+// ============================================================
 const razorpay = new Razorpay({
   key_id:     RAZORPAY_KEY_ID,
   key_secret: RAZORPAY_KEY_SECRET,
 });
 
-// Amount map in paise (₹1 = 100 paise)
 const PLAN_AMOUNTS = {
-  one_meal:    12000,   // ₹120
-  weekly:      54000,   // ₹540
-  fortnightly: 102000,  // ₹1,020
-  monthly:     198000,  // ₹1,980
+  one_meal: 12000, weekly: 54000, fortnightly: 102000, monthly: 198000,
+};
+
+// Razorpay subscription plan IDs — create these once in Razorpay Dashboard
+// Dashboard → Subscriptions → Plans → Create Plan
+// Then paste the plan_XXXX IDs here
+const RAZORPAY_PLAN_IDS = {
+  weekly:      process.env.RAZORPAY_PLAN_WEEKLY      || "",  // e.g. "plan_XXXXXXXXXX"
+  fortnightly: process.env.RAZORPAY_PLAN_FORTNIGHTLY || "",
+  monthly:     process.env.RAZORPAY_PLAN_MONTHLY     || "",
+  // one_meal has no subscription plan — it's a single order
 };
 
 const PLAN_LABELS = {
   one_meal: "One Meal", weekly: "Weekly",
-  fortnightly: "Fortnightly", monthly: "Monthly"
+  fortnightly: "Fortnightly", monthly: "Monthly",
+};
+
+const SCHOOL_PHONES = {
+  // "School Name": "10digitnumber"
+  // "Greenwood High International School": "9876543210"
 };
 
 // ============================================================
-// ─── 3. ORDER STORE (in-memory — swap with DB for production)
+// ─── 5. SCHOOL HOLIDAY CALENDAR
+// ─── Add dates as "YYYY-MM-DD" per school
+// ─── Cron skips delivery reminder if today is a holiday for ALL schools
 // ============================================================
-// For production, replace with PostgreSQL:
-//   const { Pool } = require("pg");
-//   const db = new Pool({ connectionString: process.env.DATABASE_URL });
-//   Then use db.query("INSERT INTO orders VALUES (...)")
+const SCHOOL_HOLIDAYS = {
+  // Global holidays (applies to all schools)
+  global: [
+    "2026-01-26", // Republic Day
+    "2026-08-15", // Independence Day
+    "2026-10-02", // Gandhi Jayanti
+    "2026-11-01", // Kannada Rajyotsava
+    "2026-12-25", // Christmas
+    "2026-01-14", // Sankranti
+    "2026-03-25", // Holi
+    "2026-04-14", // Dr Ambedkar Jayanti
+    "2026-04-10", // Good Friday
+    "2026-05-01", // May Day
+    "2026-06-29", // Bakrid
+    "2026-10-20", // Diwali
+    "2026-10-21", // Diwali (2nd day)
+  ],
+  // School-specific (add per school if needed)
+  "Greenwood High International School": ["2026-02-14"],
+};
 
-let orders = [];
+function isTodayHoliday() {
+  const today = new Date().toISOString().split("T")[0]; // "2026-03-28"
+  if (SCHOOL_HOLIDAYS.global.includes(today)) return true;
+  return false;
+}
 
 // ============================================================
-// ─── 4. EXCEL REPORT ─────────────────────────────────────────
-// WHERE IS THE FILE? It saves to: mealkart_orders.xlsx
-// in the same folder as server.js on your computer/server.
-// You can download it anytime at GET /api/download-report
-//
-// COLUMNS:
-//   Order ID | Date | School | Plan | Child Name |
-//   Class | Section | Parent Name | Parent Phone |
-//   Razorpay Payment ID | Amount | Status
+// ─── 6. OTP STORE (dev mode — no SMS needed)
+// ─── For production use Twilio Verify (see comment at bottom)
 // ============================================================
+const otpStore = {}; // { "9876543210": { otp: "123456", expires: timestamp } }
 
-function saveToExcel(order) {
+app.post("/api/send-otp", (req, res) => {
+  const { phone } = req.body;
+  if (!/^[6-9]\d{9}$/.test(phone)) {
+    return res.status(400).json({ success: false, error: "Invalid phone number" });
+  }
+
+  const otp     = Math.floor(100000 + Math.random() * 900000).toString();
+  const expires = Date.now() + 5 * 60 * 1000; // 5 minutes
+  otpStore[phone] = { otp, expires };
+
+  console.log(`🔐 OTP for ${phone}: ${otp}`); // visible in your terminal
+
+ // if (IS_DEV) {
+    // In dev, return OTP in response so you can see it on screen
+   // return  res.json({ success: true, otp });
+ // }
+
+  // In production: send via Twilio WhatsApp (already have Twilio set up)
+   sendWhatsApp(phone, `Your Mealkart OTP is *${otp}*. Valid for 5 minutes. Do not share with anyone.`)
+     .then(() => res.json({ success: true }))
+    .catch(() => res.status(500).json({ success: false, error: "Failed to send OTP" }));
+
+  res.json({ success: true }); // remove this line once you enable Twilio above
+});
+
+app.post("/api/verify-otp", (req, res) => {
+  const { phone, otp } = req.body;
+  const record = otpStore[phone];
+
+  if (!record)                   return res.json({ success: false, error: "No OTP found. Request a new one." });
+  if (Date.now() > record.expires) return res.json({ success: false, error: "OTP expired. Request a new one." });
+  if (record.otp !== otp)        return res.json({ success: false, error: "Incorrect OTP." });
+
+  delete otpStore[phone]; // consumed — one-time use
+  res.json({ success: true });
+});
+
+// ============================================================
+// ─── 7. SUPABASE SAVE
+// ============================================================
+async function saveToDatabase(record) {
+  const { error } = await supabase
+    .from("orders")
+    .insert([{
+      order_id:            record.orderId,
+      school:              record.school,
+      plan:                record.plan,
+      child_name:          record.childName,
+      child_class:         record.childClass,
+      child_section:       record.childSection,
+      parent_name:         record.parentName,
+      parent_phone:        record.parentPhone,
+      dietary_notes:       record.dietaryNotes || "",
+      razorpay_order_id:   record.razorpayOrderId,
+      razorpay_payment_id: record.razorpayPaymentId,
+      subscription_id:     record.subscriptionId || null,
+      amount:              (PLAN_AMOUNTS[record.plan] || 0) / 100,
+      status:              record.status,
+      created_at:          record.createdAt,
+    }]);
+
+  if (error) { console.error("❌ Supabase:", error.message); return false; }
+  console.log("✅ Saved to Supabase:", record.orderId);
+  return true;
+}
+
+// ============================================================
+// ─── 8. EXCEL SAVE
+// ============================================================
+function saveToExcel(record) {
   const HEADERS = [
-    "Order ID", "Date & Time", "School", "Plan",
-    "Child Name", "Class", "Section",
-    "Parent Name", "Parent Phone",
-    "Razorpay Payment ID", "Amount (₹)", "Status"
+    "Order ID","Date & Time (IST)","School","Plan",
+    "Child Name","Class","Section","Dietary Notes",
+    "Parent Name","Parent Phone",
+    "Razorpay Payment ID","Subscription ID","Amount (₹)","Status",
   ];
-
-  // Build the new row to append
   const newRow = [
-    order.orderId,
-    new Date(order.createdAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }),
-    order.school,
-    PLAN_LABELS[order.plan] || order.plan,
-    order.childName,
-    order.childClass,
-    order.childSection,
-    order.parentName,
-    "+91" + order.parentPhone,
-    order.razorpayPaymentId,
-    PLAN_AMOUNTS[order.plan] / 100,  // convert paise → rupees
-    order.status,
+    record.orderId,
+    new Date(record.createdAt).toLocaleString("en-IN",{timeZone:"Asia/Kolkata"}),
+    record.school, PLAN_LABELS[record.plan]||record.plan,
+    record.childName, record.childClass, record.childSection,
+    record.dietaryNotes||"None",
+    record.parentName, "+91"+record.parentPhone,
+    record.razorpayPaymentId, record.subscriptionId||"",
+    (PLAN_AMOUNTS[record.plan]||0)/100, record.status,
   ];
 
   let workbook, worksheet;
-
   if (fs.existsSync(EXCEL_FILE_PATH)) {
-    // ── File exists: READ it, then APPEND new row ──
     workbook  = xlsx.readFile(EXCEL_FILE_PATH);
     worksheet = workbook.Sheets["Orders"];
-
-    // Find next empty row by checking current range
-    const range = xlsx.utils.decode_range(worksheet["!ref"]);
-    const nextRow = range.e.r + 1; // e.r = last row index, +1 = new row
-
-    newRow.forEach((value, colIndex) => {
-      const cellAddress = xlsx.utils.encode_cell({ r: nextRow, c: colIndex });
-      const cellType    = typeof value === "number" ? "n" : "s";
-      worksheet[cellAddress] = { v: value, t: cellType };
+    const range   = xlsx.utils.decode_range(worksheet["!ref"]);
+    const nextRow = range.e.r + 1;
+    newRow.forEach((value, col) => {
+      const cell = xlsx.utils.encode_cell({ r: nextRow, c: col });
+      worksheet[cell] = { v: value, t: typeof value === "number" ? "n" : "s" };
     });
-
-    // Update the sheet's !ref range to include new row
     worksheet["!ref"] = xlsx.utils.encode_range({
-      s: { r: 0, c: 0 },
-      e: { r: nextRow, c: HEADERS.length - 1 }
+      s: { r:0, c:0 }, e: { r: nextRow, c: HEADERS.length-1 },
     });
-
   } else {
-    // ── File does not exist: CREATE it with headers + first row ──
     workbook  = xlsx.utils.book_new();
     worksheet = xlsx.utils.aoa_to_sheet([HEADERS, newRow]);
-
-    // Set column widths for readability
-    worksheet["!cols"] = [
-      { wch: 14 }, // Order ID
-      { wch: 22 }, // Date
-      { wch: 40 }, // School
-      { wch: 14 }, // Plan
-      { wch: 20 }, // Child Name
-      { wch: 10 }, // Class
-      { wch: 9  }, // Section
-      { wch: 20 }, // Parent Name
-      { wch: 16 }, // Phone
-      { wch: 24 }, // Payment ID
-      { wch: 12 }, // Amount
-      { wch: 12 }, // Status
-    ];
-
+    worksheet["!cols"] = HEADERS.map(() => ({ wch: 20 }));
     xlsx.utils.book_append_sheet(workbook, worksheet, "Orders");
   }
-
   xlsx.writeFile(workbook, EXCEL_FILE_PATH);
-  console.log(`📊 Excel updated → ${EXCEL_FILE_PATH} (${orders.length} total orders)`);
+  console.log("📊 Excel updated");
 }
 
 // ============================================================
-// ─── 5. WHATSAPP NOTIFICATIONS via Interakt ──────────────────
-// Interakt API docs: https://developers.interakt.ai/
-// You must create a message TEMPLATE in Interakt dashboard first.
-// Template example name: "order_confirmation"
-// Body: "Hi {{1}}, your meal for {{2}} ({{3}}-{{4}}) at {{5}} is confirmed! Plan: {{6}}. Order: {{7}}"
+// ─── 9. WHATSAPP NOTIFICATIONS
 // ============================================================
+async function notifyParent(record) {
+  const msg =
+    `🍱 *Mealkart – Order Confirmed!*\n\n` +
+    `Hi ${record.parentName},\n\n` +
+    `Meal subscription for *${record.childName}* is confirmed ✅\n\n` +
+    `📋 *Details:*\n` +
+    `• School  : ${record.school}\n` +
+    `• Plan    : ${PLAN_LABELS[record.plan]}\n` +
+    `• Class   : ${record.childClass} – ${record.childSection}\n` +
+    (record.dietaryNotes ? `• Diet    : ${record.dietaryNotes}\n` : "") +
+    `• Order   : ${record.orderId}\n\n` +
+    `Fresh meals every school day 🙏\nFor support reply to this message.`;
+  await sendWhatsApp(record.parentPhone, msg);
+}
 
-async function sendWhatsApp(phoneNumber, templateName, bodyValues) {
-  // phoneNumber format: "919876543210" (country code + number, no +)
-  try {
-    const response = await axios.post(
-      "https://api.interakt.ai/v1/public/message/",
-      {
-        countryCode: "+91",
-        phoneNumber: phoneNumber.replace("91", ""), // Interakt needs just 10 digits
-        callbackData: "mealkart_notification",
-        type: "Template",
-        template: {
-          name: templateName,
-          languageCode: "en",
-          bodyValues: bodyValues,
-        },
-      },
-      {
-        headers: {
-          Authorization: `Basic ${Buffer.from(WHATSAPP_API_KEY + ":").toString("base64")}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-    console.log(`📲 WhatsApp sent to ${phoneNumber}:`, response.data);
-  } catch (err) {
-    console.error(`❌ WhatsApp failed to ${phoneNumber}:`, err.response?.data || err.message);
+async function notifySchool(record) {
+  const phone = SCHOOL_PHONES[record.school];
+  if (!phone) { console.warn("⚠ No phone for school:", record.school); return; }
+  const msg =
+    `📢 *New Mealkart Subscription*\n\n` +
+    `Student : *${record.childName}* · ${record.childClass}-${record.childSection}\n` +
+    `Plan    : ${PLAN_LABELS[record.plan]}\n` +
+    (record.dietaryNotes ? `Diet    : ${record.dietaryNotes}\n` : "") +
+    `Parent  : ${record.parentName} (+91${record.parentPhone})\n` +
+    `Order   : ${record.orderId}`;
+  await sendWhatsApp(phone, msg);
+}
+
+// ============================================================
+// ─── 10. RAZORPAY SUBSCRIPTION (weekly/fortnightly/monthly)
+// ─── HOW TO GET PLAN IDs:
+//   1. Go to dashboard.razorpay.com → Subscriptions → Plans
+//   2. Click "Create Plan"
+//   3. Weekly:      period=weekly,   interval=1, amount=54000
+//   4. Fortnightly: period=weekly,   interval=2, amount=102000
+//   5. Monthly:     period=monthly,  interval=1, amount=198000
+//   6. Copy each plan_XXXX ID into your .env file
+// ============================================================
+app.post("/api/create-subscription", async (req, res) => {
+  const { plan, parentName, parentPhone, school,
+          childName, childClass, childSection, dietaryNotes, orderId } = req.body;
+
+  if (plan === "one_meal") {
+    return res.status(400).json({ error: "One Meal uses single order, not subscription" });
   }
-}
 
-// ── Send confirmation to parent ──
-async function notifyParent(order) {
-  await sendWhatsApp(
-    "91" + order.parentPhone,
-    "order_confirmation",   // Template name you created in Interakt
-    [
-      order.parentName,                   // {{1}} Hi [name]
-      order.childName,                    // {{2}} meal for [child]
-      order.childClass,                   // {{3}} class
-      order.childSection,                 // {{4}} section
-      order.school,                       // {{5}} school
-      PLAN_LABELS[order.plan] || order.plan, // {{6}} plan
-      order.orderId,                      // {{7}} order ID
-    ]
-  );
-}
-
-// ── Notify school ──
-async function notifySchool(order) {
-  const schoolPhone = SCHOOL_PHONES[order.school];
-  if (!schoolPhone) {
-    console.warn("⚠ No WhatsApp number mapped for:", order.school);
-    return;
-  }
-  await sendWhatsApp(
-    schoolPhone,
-    "school_notification",  // Template name you created in Interakt
-    [
-      order.school,
-      order.childName,
-      order.childClass + "-" + order.childSection,
-      PLAN_LABELS[order.plan] || order.plan,
-      order.parentName,
-      order.parentPhone,
-    ]
-  );
-}
-
-// ============================================================
-// ─── 6. API: CREATE RAZORPAY ORDER ───────────────────────────
-// ============================================================
-
-app.post("/api/create-order", async (req, res) => {
-  const { amount, plan, childName, childClass, childSection,
-          parentName, parentPhone, school, orderId } = req.body;
-  try {
-    const order = await razorpay.orders.create({
-      amount:   PLAN_AMOUNTS[plan] || amount,
-      currency: "INR",
-      receipt:  orderId,
-      notes:    { school, plan, childName, childClass, childSection, parentName, parentPhone },
+  const planId = RAZORPAY_PLAN_IDS[plan];
+  if (!planId) {
+    return res.status(400).json({
+      error: `No Razorpay plan ID configured for "${plan}". Add to .env: RAZORPAY_PLAN_${plan.toUpperCase()}=plan_XXXX`
     });
-    console.log("✅ Razorpay order created:", order.id);
-    res.json({ id: order.id, amount: order.amount, currency: order.currency });
+  }
+
+  try {
+    const subscription = await razorpay.subscriptions.create({
+      plan_id:        planId,
+      total_count:    12,   // max renewal cycles (12 weeks / 12 months etc.)
+      quantity:       1,
+      customer_notify: 1,
+      notes: { school, childName, childClass, childSection, parentName, parentPhone, orderId },
+    });
+    console.log("✅ Subscription created:", subscription.id);
+    res.json({ subscription_id: subscription.id, status: subscription.status });
   } catch (err) {
-    console.error("❌ Order creation failed:", err.message);
-    res.status(500).json({ error: "Order creation failed", details: err.message });
+    console.error("❌ Subscription creation failed:", err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
 // ============================================================
-// ─── 7. API: VERIFY PAYMENT + SAVE + NOTIFY ──────────────────
+// ─── 11. CREATE ONE-TIME ORDER (for "one_meal" plan)
 // ============================================================
+app.post("/api/create-order", async (req, res) => {
+  const { plan, childName, childClass, childSection,
+          parentName, parentPhone, school, orderId } = req.body;
 
+  if (!PLAN_AMOUNTS[plan]) return res.status(400).json({ error: "Invalid plan" });
+  if (!/^[6-9]\d{9}$/.test(parentPhone)) return res.status(400).json({ error: "Invalid phone" });
+
+  try {
+    const order = await razorpay.orders.create({
+      amount: PLAN_AMOUNTS[plan], currency: "INR", receipt: orderId,
+      notes:  { school, plan, childName, childClass, childSection, parentName, parentPhone },
+    });
+    console.log("✅ Order created:", order.id);
+    res.json({ id: order.id, amount: order.amount, currency: order.currency });
+  } catch (err) {
+    console.error("❌ Order creation failed:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// ─── 12. VERIFY PAYMENT → SAVE → NOTIFY
+// ============================================================
 app.post("/api/verify-payment", async (req, res) => {
-  const { razorpay_order_id, razorpay_payment_id,
-          razorpay_signature, formData, orderId } = req.body;
+  const { razorpay_order_id, razorpay_payment_id, razorpay_signature,
+          razorpay_subscription_id, formData, orderId } = req.body;
 
-  // STEP 1: Verify Razorpay signature (security check — never skip)
-  const body     = razorpay_order_id + "|" + razorpay_payment_id;
-  const expected = crypto
-    .createHmac("sha256", RAZORPAY_KEY_SECRET)
-    .update(body).digest("hex");
+  // Verify signature
+  const sigBody  = (razorpay_subscription_id
+    ? razorpay_payment_id + "|" + razorpay_subscription_id
+    : razorpay_order_id   + "|" + razorpay_payment_id);
+  const expected = crypto.createHmac("sha256", RAZORPAY_KEY_SECRET)
+    .update(sigBody).digest("hex");
 
   if (expected !== razorpay_signature) {
-    console.error("❌ Payment signature mismatch!");
     return res.status(400).json({ success: false, error: "Invalid signature" });
   }
 
-  console.log("✅ Payment verified:", razorpay_payment_id);
+  // Duplicate check
+  const { data: existing } = await supabase.from("orders")
+    .select("order_id").eq("razorpay_payment_id", razorpay_payment_id).single();
+  if (existing) return res.json({ success: true, orderId: existing.order_id });
 
-  // STEP 2: Build order record
   const record = {
     orderId,
     school:            formData.school,
@@ -298,113 +362,201 @@ app.post("/api/verify-payment", async (req, res) => {
     childSection:      formData.childSection,
     parentName:        formData.parentName,
     parentPhone:       formData.parentPhone,
-    razorpayOrderId:   razorpay_order_id,
+    dietaryNotes:      formData.dietaryNotes || "",
+    razorpayOrderId:   razorpay_order_id || "",
     razorpayPaymentId: razorpay_payment_id,
+    subscriptionId:    razorpay_subscription_id || null,
     status:            "confirmed",
     createdAt:         new Date().toISOString(),
   };
 
-  // STEP 3: Save to in-memory store
-  orders.push(record);
-
-  // STEP 4: Save to Excel file (appends a new row)
+  await saveToDatabase(record);
   saveToExcel(record);
+  await notifyParent(record);
+  await notifySchool(record);
 
-  // STEP 5: Send WhatsApp notifications (non-blocking)
-  notifyParent(record);
-  notifySchool(record);
-
-  // STEP 6: Respond to frontend → shows confirmation screen
   res.json({ success: true, orderId });
 });
 
 // ============================================================
-// ─── 8. RAZORPAY WEBHOOK (extra safety net) ──────────────────
-// Add this URL in: Razorpay Dashboard → Webhooks → + Add New
-// URL: https://yourdomain.com/api/webhook
-// Events to select: payment.captured, subscription.charged
+// ─── 13. WEBHOOK
 // ============================================================
-
 app.post("/api/webhook", express.raw({ type: "application/json" }), (req, res) => {
   const sig      = req.headers["x-razorpay-signature"];
   const body     = req.body.toString();
   const expected = crypto.createHmac("sha256", RAZORPAY_KEY_SECRET).update(body).digest("hex");
-
   if (expected !== sig) return res.status(400).send("Bad signature");
 
   const event = JSON.parse(body);
-  console.log("📡 Webhook event:", event.event);
+  console.log("📡 Webhook:", event.event);
 
-  if (event.event === "payment.captured") {
-    console.log("💰 Captured:", event.payload.payment.entity.id);
-  }
   if (event.event === "subscription.charged") {
-    console.log("🔄 Subscription recharged:", event.payload.subscription.entity.id);
+    const sub = event.payload.subscription.entity;
+    console.log("🔄 Subscription auto-renewed:", sub.id);
+    // Optionally send a renewal WhatsApp to parent here
+  }
+  if (event.event === "subscription.cancelled") {
+    const sub = event.payload.subscription.entity;
+    console.log("❌ Subscription cancelled:", sub.id);
+    // Update status in Supabase to "cancelled"
   }
 
   res.json({ status: "ok" });
 });
 
 // ============================================================
-// ─── 9. CRON JOB — 9:45 AM IST DAILY REMINDER ───────────────
-// Fires Monday–Friday at 9:45 AM India time
+// ─── 14. CRON — 9:45 AM IST MON–FRI (skips holidays)
 // ============================================================
-
 cron.schedule("15 4 * * 1-5", async () => {
-  console.log("⏰ 9:45 AM IST — Sending delivery reminder...");
+  if (isTodayHoliday()) {
+    console.log("🎉 Today is a school holiday — skipping delivery reminder.");
+    return;
+  }
 
-  const active = orders.filter(o => o.status === "confirmed");
-  if (!active.length) { console.log("No orders today."); return; }
+  const { data: active, error } = await supabase
+    .from("orders").select("*").eq("status", "confirmed");
 
-  const listText = active
-    .map((o, i) => `${i + 1}. ${o.childName} · ${o.childClass}-${o.childSection} · ${o.school}`)
-    .join("\n");
+  if (error || !active?.length) { console.log("No active orders."); return; }
 
-  // Send to admin via WhatsApp
-  await sendWhatsApp(
-    ADMIN_PHONE,
-    "delivery_reminder",   // Template name you created in Interakt
-    [
-      String(active.length),
-      new Date().toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" }),
-      listText,
-    ]
+  const list = active.map((o,i) =>
+    `${i+1}. ${o.child_name} | ${o.child_class}-${o.child_section} | ${o.school}` +
+    (o.dietary_notes ? ` | ⚠ ${o.dietary_notes}` : "")
+  ).join("\n");
+
+  await sendWhatsApp(ADMIN_PHONE,
+    `🚚 *Mealkart Delivery Reminder*\n` +
+    `📅 ${new Date().toLocaleDateString("en-IN",{timeZone:"Asia/Kolkata"})}\n\n` +
+    `*${active.length}* deliveries today:\n\n${list}\n\n` +
+    `Dispatch by 11:00 AM ✅`
   );
-
   console.log(`✅ Reminder sent for ${active.length} orders`);
 
 }, { timezone: "Asia/Kolkata" });
 
 // ============================================================
-// ─── 10. ADMIN ENDPOINTS ─────────────────────────────────────
+// ─── 15. ADMIN ROUTES (password protected)
 // ============================================================
 
-// View all orders in browser/Postman
-app.get("/api/orders", (req, res) => {
-  res.json({ total: orders.length, orders });
-});
-
-// Download Excel file directly
-// Open in browser: http://localhost:5000/api/download-report
-app.get("/api/download-report", (req, res) => {
-  if (!fs.existsSync(EXCEL_FILE_PATH)) {
-    return res.status(404).json({ error: "No orders yet. Place an order first." });
+// Simple token auth middleware
+function adminAuth(req, res, next) {
+  const token = req.headers["x-admin-token"] || req.query.token;
+  if (token !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "Unauthorized. Wrong admin password." });
   }
-  res.download(EXCEL_FILE_PATH, "mealkart_orders.xlsx");
+  next();
+}
+
+// Login — POST /api/admin/login { password: "..." }
+app.post("/api/admin/login", (req, res) => {
+  if (req.body.password === ADMIN_PASSWORD) {
+    res.json({ success: true, token: ADMIN_PASSWORD });
+  } else {
+    res.status(401).json({ success: false, error: "Wrong password" });
+  }
+});
+
+// All orders
+app.get("/api/admin/orders", adminAuth, async (req, res) => {
+  const { data, error } = await supabase
+    .from("orders").select("*").order("created_at", { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ total: data.length, orders: data });
+});
+
+// Today's orders
+app.get("/api/admin/orders/today", adminAuth, async (req, res) => {
+  const today = new Date().toISOString().split("T")[0];
+  const { data, error } = await supabase
+    .from("orders").select("*")
+    .gte("created_at", today + "T00:00:00")
+    .lte("created_at", today + "T23:59:59")
+    .order("created_at", { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ total: data.length, orders: data });
+});
+
+// Revenue summary
+app.get("/api/admin/summary", adminAuth, async (req, res) => {
+  const { data, error } = await supabase.from("orders").select("amount, plan, status, created_at");
+  if (error) return res.status(500).json({ error: error.message });
+
+  const confirmed = data.filter(o => o.status === "confirmed");
+  const totalRev  = confirmed.reduce((sum, o) => sum + parseFloat(o.amount || 0), 0);
+  const byPlan    = confirmed.reduce((acc, o) => {
+    acc[o.plan] = (acc[o.plan] || 0) + 1; return acc;
+  }, {});
+  const today     = new Date().toISOString().split("T")[0];
+  const todayRev  = confirmed
+    .filter(o => o.created_at?.startsWith(today))
+    .reduce((sum, o) => sum + parseFloat(o.amount || 0), 0);
+
+  res.json({
+    total_orders:    confirmed.length,
+    total_revenue:   totalRev.toFixed(2),
+    today_orders:    confirmed.filter(o => o.created_at?.startsWith(today)).length,
+    today_revenue:   todayRev.toFixed(2),
+    by_plan:         byPlan,
+  });
+});
+
+// Download Excel
+app.get("/api/admin/download", adminAuth, async (req, res) => {
+  const { data, error } = await supabase
+    .from("orders").select("*").order("created_at",{ascending:true});
+  if (error) return res.status(500).json({ error: error.message });
+  if (!data?.length) return res.status(404).json({ error: "No orders yet." });
+
+  const HEADERS = [
+    "Order ID","Date (IST)","School","Plan","Child Name","Class","Section",
+    "Dietary Notes","Parent Name","Parent Phone","Payment ID","Subscription ID","Amount (₹)","Status"
+  ];
+  const rows = data.map(o => [
+    o.order_id,
+    new Date(o.created_at).toLocaleString("en-IN",{timeZone:"Asia/Kolkata"}),
+    o.school, PLAN_LABELS[o.plan]||o.plan, o.child_name, o.child_class,
+    o.child_section, o.dietary_notes||"", o.parent_name,
+    "+91"+o.parent_phone, o.razorpay_payment_id,
+    o.subscription_id||"", o.amount, o.status,
+  ]);
+
+  const wb = xlsx.utils.book_new();
+  const ws = xlsx.utils.aoa_to_sheet([HEADERS,...rows]);
+  ws["!cols"] = HEADERS.map(()=>({wch:20}));
+  xlsx.utils.book_append_sheet(wb, ws, "Orders");
+  const tmp = path.join(__dirname, "_tmp_report.xlsx");
+  xlsx.writeFile(wb, tmp);
+  res.download(tmp, "mealkart_orders.xlsx", () => fs.unlinkSync(tmp));
+});
+
+// Public track-by-phone (no auth needed)
+app.get("/api/orders/phone/:phone", async (req, res) => {
+  const { phone } = req.params;
+  if (!/^[6-9]\d{9}$/.test(phone)) return res.status(400).json({ error: "Invalid phone" });
+  const { data, error } = await supabase
+    .from("orders")
+    .select("order_id,school,plan,child_name,child_class,child_section,parent_name,amount,status,created_at,dietary_notes")
+    .eq("parent_phone", phone).eq("status","confirmed")
+    .order("created_at",{ascending:false});
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ orders: data||[] });
 });
 
 // ============================================================
-// ─── START SERVER ────────────────────────────────────────────
+// ─── START
 // ============================================================
-
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`\n🍱  Mealkart backend running at http://localhost:${PORT}`);
-  console.log(`\n   Endpoints:`);
-  console.log(`   POST  /api/create-order      ← frontend calls this`);
-  console.log(`   POST  /api/verify-payment    ← frontend calls after payment`);
-  console.log(`   POST  /api/webhook           ← Razorpay calls this`);
-  console.log(`   GET   /api/orders            ← view all orders`);
-  console.log(`   GET   /api/download-report   ← download Excel file`);
-  console.log(`\n   Excel file saves to: ${EXCEL_FILE_PATH}\n`);
+  console.log(`\n🍱  Mealkart backend → http://localhost:${PORT}`);
+  console.log(`   CORS allowed: ${ALLOWED_ORIGINS.join(", ")}`);
+  console.log(`   DEV mode: ${IS_DEV}`);
+  console.log(`   POST /api/send-otp`);
+  console.log(`   POST /api/verify-otp`);
+  console.log(`   POST /api/create-order        (one_meal)`);
+  console.log(`   POST /api/create-subscription (weekly/fortnightly/monthly)`);
+  console.log(`   POST /api/verify-payment`);
+  console.log(`   POST /api/admin/login`);
+  console.log(`   GET  /api/admin/orders`);
+  console.log(`   GET  /api/admin/orders/today`);
+  console.log(`   GET  /api/admin/summary`);
+  console.log(`   GET  /api/admin/download\n`);
 });
