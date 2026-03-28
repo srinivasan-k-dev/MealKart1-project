@@ -20,7 +20,7 @@ const app = express();
 // ============================================================
 // ─── 1. CORS — only allow your frontend origin
 // ============================================================
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "http://localhost:5173")
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "https://meal-kart1-project.vercel.app,http://localhost:3000")
   .split(",")
   .map(o => o.trim());
 
@@ -137,15 +137,15 @@ app.post("/api/send-otp", (req, res) => {
 
   console.log(`🔐 OTP for ${phone}: ${otp}`); // visible in your terminal
 
- // if (IS_DEV) {
+  if (IS_DEV) {
     // In dev, return OTP in response so you can see it on screen
-   // return  res.json({ success: true, otp });
- // }
+    return res.json({ success: true, otp });
+  }
 
   // In production: send via Twilio WhatsApp (already have Twilio set up)
-   sendWhatsApp(phone, `Your Mealkart OTP is *${otp}*. Valid for 5 minutes. Do not share with anyone.`)
-     .then(() => res.json({ success: true }))
-    .catch(() => res.status(500).json({ success: false, error: "Failed to send OTP" }));
+  // sendWhatsApp(phone, `Your Mealkart OTP is *${otp}*. Valid for 5 minutes. Do not share with anyone.`)
+  //   .then(() => res.json({ success: true }))
+  //   .catch(() => res.status(500).json({ success: false, error: "Failed to send OTP" }));
 
   res.json({ success: true }); // remove this line once you enable Twilio above
 });

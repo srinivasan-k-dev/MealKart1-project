@@ -3,6 +3,7 @@ import "./App.css";
 // ── All styles live in App.css ──
 
 // ── Constants ──────────────────────────────────────────────────────────
+const BACKEND = import.meta.env.VITE_API_URL
 
 const SCHOOLS = [
   "The International School Bangalore (TISB)",
@@ -193,7 +194,7 @@ export default function Mealkart() {
     setOtpSending(true);
     setOtpError("");
     try {
-      const res  = await fetch("http://localhost:5000/api/send-otp", {
+      const res  = await fetch("https://mealkart1-project-production.up.railway.app/api/send-otp", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone: form.parentPhone }),
@@ -216,7 +217,7 @@ export default function Mealkart() {
   const handleVerifyOtp = async () => {
     setOtpError("");
     try {
-      const res  = await fetch("http://localhost:5000/api/verify-otp", {
+      const res  = await fetch("https://mealkart1-project-production.up.railway.app/api/verify-otp", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone: form.parentPhone, otp: otpValue }),
@@ -238,7 +239,7 @@ export default function Mealkart() {
     setPaying(true);
     setPayError(null);
 
-    fetch("http://localhost:5000/api/create-order", {
+    fetch("https://mealkart1-project-production.up.railway.app/api/create-order", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -262,7 +263,7 @@ export default function Mealkart() {
                  class: form.childClass+" "+form.childSection, plan: form.plan },
         theme: { color: "#FF5722" },
         handler: function(response) {
-          fetch("http://localhost:5000/api/verify-payment", {
+          fetch("https://mealkart1-project-production.up.railway.app/api/verify-payment", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -313,7 +314,7 @@ export default function Mealkart() {
     setTracking(true);
     setTrackResult(null);
     try {
-      const res  = await fetch(`http://localhost:5000/api/orders/phone/${trackPhone}`);
+      const res  = await fetch(`https://mealkart1-project-production.up.railway.app/api/orders/phone/${trackPhone}`);
       const data = await res.json();
       setTrackResult(data.orders || []);
     } catch {

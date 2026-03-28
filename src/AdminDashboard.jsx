@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 
 // ── All styles in App.css (add admin CSS block below to App.css) ──
 
-const API = "http://localhost:5000";
+const API = "https://mealkart1-project-production.up.railway.app";
 
 const PLAN_COLORS = {
   one_meal:    "#FF6D00",
