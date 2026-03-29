@@ -2,7 +2,9 @@ import { useState, useEffect } from "react";
 
 // ── All styles in App.css (add admin CSS block below to App.css) ──
 
+// ── Backend URL — change this one line to switch between local and live ──
 const API = "https://mealkart-project.onrender.com";
+// const API = "http://localhost:5000"; // ← uncomment for local dev
 
 const PLAN_COLORS = {
   one_meal:    "#FF6D00",

@@ -87,6 +87,10 @@ const TESTIMONIALS = [
   },
 ];
 
+// ── Backend URL — change this one line to switch between local and live ──
+const BACKEND = "https://mealkart-project.onrender.com";
+// const BACKEND = "http://localhost:5000"; // ← uncomment for local dev
+
 // ── Razorpay key ────────────────────────────────────────────────────────
 const RAZORPAY_KEY_ID = "rzp_test_SV4dFeYMKqu3JH";
 
@@ -193,7 +197,7 @@ export default function Mealkart() {
     setOtpSending(true);
     setOtpError("");
     try {
-      const res  = await fetch("https://mealkart-project.onrender.com/api/send-otp", {
+      const res  = await fetch(`${BACKEND}/api/send-otp`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone: form.parentPhone }),
@@ -216,7 +220,7 @@ export default function Mealkart() {
   const handleVerifyOtp = async () => {
     setOtpError("");
     try {
-      const res  = await fetch("https://mealkart-project.onrender.com/api/verify-otp", {
+      const res  = await fetch(`${BACKEND}/api/verify-otp`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone: form.parentPhone, otp: otpValue }),
@@ -238,7 +242,7 @@ export default function Mealkart() {
     setPaying(true);
     setPayError(null);
 
-    fetch("https://mealkart-project.onrender.com/api/create-order", {
+    fetch(`${BACKEND}/api/create-order`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -262,7 +266,7 @@ export default function Mealkart() {
                  class: form.childClass+" "+form.childSection, plan: form.plan },
         theme: { color: "#FF5722" },
         handler: function(response) {
-          fetch("https://mealkart-project.onrender.com/api/verify-payment", {
+          fetch(`${BACKEND}/api/verify-payment`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -313,7 +317,7 @@ export default function Mealkart() {
     setTracking(true);
     setTrackResult(null);
     try {
-      const res  = await fetch(`https://mealkart-project.onrender.com/api/orders/phone/${trackPhone}`);
+      const res  = await fetch(`${BACKEND}/api/orders/phone/${trackPhone}`);
       const data = await res.json();
       setTrackResult(data.orders || []);
     } catch {
