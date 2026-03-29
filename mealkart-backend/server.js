@@ -549,16 +549,19 @@ app.get("/api/admin/download", adminAuth, async (req, res) => {
 });
 
 // Public track-by-phone (no auth needed)
-app.get("/api/orders/phone/:phone", async (req, res) => {
-  const { phone } = req.params;
-  if (!/^[6-9]\d{9}$/.test(phone)) return res.status(400).json({ error: "Invalid phone" });
+// Uses query param ?phone=9876543210 to avoid Express 5 path-to-regexp PathError
+app.get("/api/orders/track", async (req, res) => {
+  const phone = req.query.phone;
+  if (!phone || !/^[6-9]\d{9}$/.test(phone)) {
+    return res.status(400).json({ error: "Invalid phone number" });
+  }
   const { data, error } = await supabase
     .from("orders")
     .select("order_id,school,plan,child_name,child_class,child_section,parent_name,amount,status,created_at,dietary_notes")
     .eq("parent_phone", phone).eq("status","confirmed")
     .order("created_at",{ascending:false});
   if (error) return res.status(500).json({ error: error.message });
-  res.json({ orders: data||[] });
+  res.json({ orders: data || [] });
 });
 
 // ============================================================

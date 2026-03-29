@@ -317,7 +317,7 @@ export default function Mealkart() {
     setTracking(true);
     setTrackResult(null);
     try {
-      const res  = await fetch(`${BACKEND}/api/orders/phone/${trackPhone}`);
+      const res  = await fetch(`${BACKEND}/api/orders/track?phone=${trackPhone}`);
       const data = await res.json();
       setTrackResult(data.orders || []);
     } catch {
