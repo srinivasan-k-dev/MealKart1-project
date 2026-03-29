@@ -483,39 +483,57 @@ app.get("/api/admin/orders", adminAuth, async (req, res) => {
   res.json({ total: data.length, orders: data });
 });
 
-// Today's orders
+// Today's orders — uses IST timezone (UTC+5:30)
 app.get("/api/admin/orders/today", adminAuth, async (req, res) => {
-  const today = new Date().toISOString().split("T")[0];
+  // Get today's date in IST properly
+  const now     = new Date();
+  const istOffset = 5.5 * 60 * 60 * 1000; // IST = UTC + 5:30
+  const istNow  = new Date(now.getTime() + istOffset);
+  const today   = istNow.toISOString().split("T")[0]; // "YYYY-MM-DD" in IST
+
+  // Query with a wide enough window to catch IST day boundaries
+  const startUTC = new Date(today + "T00:00:00+05:30").toISOString();
+  const endUTC   = new Date(today + "T23:59:59+05:30").toISOString();
+
   const { data, error } = await supabase
-    .from("orders").select("*")
-    .gte("created_at", today + "T00:00:00")
-    .lte("created_at", today + "T23:59:59")
+    .from("orders")
+    .select("*")
+    .gte("created_at", startUTC)
+    .lte("created_at", endUTC)
     .order("created_at", { ascending: false });
+
   if (error) return res.status(500).json({ error: error.message });
   res.json({ total: data.length, orders: data });
 });
 
 // Revenue summary
 app.get("/api/admin/summary", adminAuth, async (req, res) => {
-  const { data, error } = await supabase.from("orders").select("amount, plan, status, created_at");
+  const { data, error } = await supabase
+    .from("orders").select("amount, plan, status, created_at");
   if (error) return res.status(500).json({ error: error.message });
 
-  const confirmed = data.filter(o => o.status === "confirmed");
-  const totalRev  = confirmed.reduce((sum, o) => sum + parseFloat(o.amount || 0), 0);
-  const byPlan    = confirmed.reduce((acc, o) => {
+  // Use IST for today's date
+  const istNow  = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+  const today   = istNow.toISOString().split("T")[0];
+  const startUTC = new Date(today + "T00:00:00+05:30").toISOString();
+  const endUTC   = new Date(today + "T23:59:59+05:30").toISOString();
+
+  const confirmed  = data.filter(o => o.status === "confirmed");
+  const totalRev   = confirmed.reduce((s, o) => s + parseFloat(o.amount || 0), 0);
+  const byPlan     = confirmed.reduce((acc, o) => {
     acc[o.plan] = (acc[o.plan] || 0) + 1; return acc;
   }, {});
-  const today     = new Date().toISOString().split("T")[0];
-  const todayRev  = confirmed
-    .filter(o => o.created_at?.startsWith(today))
-    .reduce((sum, o) => sum + parseFloat(o.amount || 0), 0);
+  const todayOrders = confirmed.filter(o =>
+    o.created_at >= startUTC && o.created_at <= endUTC
+  );
+  const todayRev = todayOrders.reduce((s, o) => s + parseFloat(o.amount || 0), 0);
 
   res.json({
-    total_orders:    confirmed.length,
-    total_revenue:   totalRev.toFixed(2),
-    today_orders:    confirmed.filter(o => o.created_at?.startsWith(today)).length,
-    today_revenue:   todayRev.toFixed(2),
-    by_plan:         byPlan,
+    total_orders:  confirmed.length,
+    total_revenue: totalRev.toFixed(2),
+    today_orders:  todayOrders.length,
+    today_revenue: todayRev.toFixed(2),
+    by_plan:       byPlan,
   });
 });
 
@@ -583,3 +601,4 @@ app.listen(PORT, () => {
   console.log(`   GET  /api/admin/summary`);
   console.log(`   GET  /api/admin/download\n`);
 });
+

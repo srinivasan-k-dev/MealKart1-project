@@ -73,16 +73,26 @@ export default function AdminDashboard() {
   async function loadData(t = token, currentTab = tab) {
     setLoading(true);
     try {
+      const endpoint = currentTab === "today"
+        ? `${API}/api/admin/orders/today`
+        : `${API}/api/admin/orders`;
+
       const [ordRes, sumRes] = await Promise.all([
-        fetch(`${API}/api/admin/orders${currentTab === "today" ? "/today" : ""}`, {
-          headers: { "x-admin-token": t },
-        }),
+        fetch(endpoint, { headers: { "x-admin-token": t } }),
         fetch(`${API}/api/admin/summary`, { headers: { "x-admin-token": t } }),
       ]);
+
+      if (ordRes.status === 401 || sumRes.status === 401) {
+        logout(); return;
+      }
+
       const [ordData, sumData] = await Promise.all([ordRes.json(), sumRes.json()]);
       setOrders(ordData.orders || []);
       setSummary(sumData);
-    } catch { setOrders([]); }
+    } catch (err) {
+      console.error("Admin load error:", err);
+      setOrders([]);
+    }
     setLoading(false);
   }
 
@@ -102,7 +112,8 @@ export default function AdminDashboard() {
 
   function switchTab(t) {
     setTab(t);
-    if (t !== "summary") loadData(token, t);
+    setSearch("");
+    loadData(token, t);
   }
 
   const filtered = orders.filter(o =>
