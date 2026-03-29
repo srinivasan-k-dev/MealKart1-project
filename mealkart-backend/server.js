@@ -20,7 +20,7 @@ const app = express();
 // ============================================================
 // ─── 1. CORS — only allow your frontend origin
 // ============================================================
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "https://meal-kart1-project.vercel.app,http://localhost:3000")
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "https://meal-kart1-project.vercel.app,http://localhost:3000,http://localhost:5173")
   .split(",")
   .map(o => o.trim());
 
@@ -120,45 +120,55 @@ function isTodayHoliday() {
 }
 
 // ============================================================
-// ─── 6. OTP STORE (dev mode — no SMS needed)
-// ─── For production use Twilio Verify (see comment at bottom)
+// ─── 6. OTP STORE
+// ─── otpStore lives in memory — works fine for dev and small traffic.
+// ─── NOTE: Render free tier spins down after 15 min inactivity.
+// ─── When it spins back up, otpStore is wiped. If a parent requests
+// ─── OTP, waits too long, and the server restarts, they just click
+// ─── "Resend OTP" to get a fresh one. Not a real problem in practice.
 // ============================================================
-const otpStore = {}; // { "9876543210": { otp: "123456", expires: timestamp } }
+const otpStore = {};
 
-app.post("/api/send-otp", (req, res) => {
+app.post("/api/send-otp", async (req, res) => {
   const { phone } = req.body;
   if (!/^[6-9]\d{9}$/.test(phone)) {
     return res.status(400).json({ success: false, error: "Invalid phone number" });
   }
 
   const otp     = Math.floor(100000 + Math.random() * 900000).toString();
-  const expires = Date.now() + 5 * 60 * 1000; // 5 minutes
+  const expires = Date.now() + 10 * 60 * 1000; // 10 minutes
   otpStore[phone] = { otp, expires };
 
-  console.log(`🔐 OTP for ${phone}: ${otp}`); // visible in your terminal
+  console.log(`🔐 OTP for ${phone}: ${otp}`); // always visible in Render logs
 
   if (IS_DEV) {
-    // In dev, return OTP in response so you can see it on screen
+    // Dev mode — return OTP in response body so it shows on screen
     return res.json({ success: true, otp });
   }
 
-  // In production: send via Twilio WhatsApp (already have Twilio set up)
-  // sendWhatsApp(phone, `Your Mealkart OTP is *${otp}*. Valid for 5 minutes. Do not share with anyone.`)
-  //   .then(() => res.json({ success: true }))
-  //   .catch(() => res.status(500).json({ success: false, error: "Failed to send OTP" }));
-
-  res.json({ success: true }); // remove this line once you enable Twilio above
+  // Production — send OTP via Twilio WhatsApp to the parent's number
+  try {
+    await sendWhatsApp(phone,
+      `🔐 Your Mealkart OTP is *${otp}*\n\nValid for 10 minutes. Do not share this with anyone.`
+    );
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("❌ OTP WhatsApp failed:", err.message);
+    // Even if WhatsApp fails, return the OTP so it shows on screen as fallback
+    // Remove the otp field below before going live if you don't want it visible
+    return res.json({ success: true, otp, warning: "WhatsApp failed — OTP shown as fallback" });
+  }
 });
 
 app.post("/api/verify-otp", (req, res) => {
   const { phone, otp } = req.body;
   const record = otpStore[phone];
 
-  if (!record)                   return res.json({ success: false, error: "No OTP found. Request a new one." });
-  if (Date.now() > record.expires) return res.json({ success: false, error: "OTP expired. Request a new one." });
-  if (record.otp !== otp)        return res.json({ success: false, error: "Incorrect OTP." });
+  if (!record)                     return res.json({ success: false, error: "No OTP found. Click Resend OTP." });
+  if (Date.now() > record.expires) return res.json({ success: false, error: "OTP expired. Click Resend OTP." });
+  if (record.otp !== otp)          return res.json({ success: false, error: "Incorrect OTP. Try again." });
 
-  delete otpStore[phone]; // consumed — one-time use
+  delete otpStore[phone]; // one-time use
   res.json({ success: true });
 });
 
