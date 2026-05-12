@@ -1,41 +1,10 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import "./App.css";
 // ── All styles live in App.css ──
 
 // ── Constants ──────────────────────────────────────────────────────────
 
-const SCHOOLS = [
-  "The International School Bangalore (TISB)",
-  "Inventure Academy",
-  "Greenwood High International School",
-  "Whitefield Global School",
-  "Stonehill International School",
-  "Delhi Public School (DPS) – Bangalore East",
-  "Ryan International School – Bannerghatta Road",
-  "National Public School (NPS) – Koramangala",
-  "Vibgyor High – Marathahalli",
-  "Orchids The International School – HSR Layout",
-  "Indus International School",
-  "Oakridge International School",
-  "Candor International School",
-  "Canadian International School",
-  "Gear Innovative International School",
-  "Harvest International School",
-  "Prakriya Green Wisdom School",
-  "The Valley School",
-  "Chrysalis High – Bellandur",
-  "Presidency School – RT Nagar",
-  "Bishop Cotton Boys' School",
-  "Baldwin Boys' High School",
-  "St. Joseph's Boys' High School",
-  "Clarence High School",
-  "Frank Anthony Public School",
-  "St. Francis Xavier Girls' High School",
-  "Sophia High School",
-  "Holy Cross School – Chamrajpet",
-  "CMR National Public School – ITPL",
-  "Kendriya Vidyalaya – Sadashivanagar",
-];
+// Schools are fetched from Supabase via backend — no hardcoded list needed
 
 const PLANS = [
   { id: "one_meal",    label: "One Meal",    icon: "🍱", price: "₹120",   desc: "Single meal, no commitment" },
@@ -92,7 +61,7 @@ const BACKEND = "https://mealkart-project.onrender.com";
 // const BACKEND = "http://localhost:5000"; // ← uncomment for local dev
 
 // ── Razorpay key ────────────────────────────────────────────────────────
-const RAZORPAY_KEY_ID = "rzp_test_SV4dFeYMKqu3JH";
+const RAZORPAY_KEY_ID = "rzp_live_SX2Exq3BAxFpDf";
 
 const PLAN_AMOUNTS = {
   one_meal: 12000, weekly: 54000, fortnightly: 102000, monthly: 198000,
@@ -129,6 +98,10 @@ export default function Mealkart() {
   const [showTerms,   setShowTerms]   = useState(false);
   const [openFaq,     setOpenFaq]     = useState(null);
 
+  // ── Schools state (fetched from Supabase via backend) ─────────────
+  const [schools,        setSchools]        = useState([]);
+  const [schoolsLoading, setSchoolsLoading] = useState(false);
+
   // ── OTP state ──────────────────────────────────────────────────────
   // NOTE: OTP details at bottom of file
   const [otpSent,     setOtpSent]     = useState(false);
@@ -148,6 +121,28 @@ export default function Mealkart() {
     return fresh;
   });
 
+  // ── Load all schools on mount ─────────────────────────────────────
+  useEffect(() => {
+    fetch(`${BACKEND}/api/schools`)
+      .then(r => r.json())
+      .then(d => setSchools(d.schools || []))
+      .catch(() => {});
+  }, []);
+
+  // ── Search schools with 300ms debounce ────────────────────────────
+  useEffect(() => {
+    const timer = setTimeout(async () => {
+      setSchoolsLoading(true);
+      try {
+        const res  = await fetch(`${BACKEND}/api/schools?search=${encodeURIComponent(schoolSearch)}`);
+        const data = await res.json();
+        setSchools(data.schools || []);
+      } catch { setSchools([]); }
+      setSchoolsLoading(false);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [schoolSearch]);
+
   // ── Helpers ────────────────────────────────────────────────────────
   const set = (k, v) => setForm(f => {
     const updated = { ...f, [k]: v };
@@ -159,9 +154,7 @@ export default function Mealkart() {
     setStep(s);
     if (typeof s === "number") sessionStorage.setItem("mk_step", s);
   };
-  const filteredSchools = SCHOOLS.filter(s =>
-    s.toLowerCase().includes(schoolSearch.toLowerCase())
-  );
+  const filteredSchools = schools;
   const selectedPlan = PLANS.find(p => p.id === form.plan);
 
   // ── Validation ─────────────────────────────────────────────────────
@@ -261,7 +254,18 @@ export default function Mealkart() {
         name: "Mealkart",
         description: `${selectedPlan?.label} Plan – ${form.childName}`,
         order_id: order.id,
-        prefill: { name: form.parentName, contact: "+91" + form.parentPhone },
+        prefill: {
+          name: form.parentName,
+          contact: "+91" + form.parentPhone,
+          // No email/vpa prefill — avoids "Invalid UPI ID" error on live key
+        },
+        method: {
+          upi:        true,
+          card:       true,
+          netbanking: true,
+          wallet:     true,
+          emi:        false,
+        },
         notes: { school: form.school, child: form.childName,
                  class: form.childClass+" "+form.childSection, plan: form.plan },
         theme: { color: "#FF5722" },
@@ -556,7 +560,12 @@ export default function Mealkart() {
               />
             </div>
             <div className="mk-school-list">
-              {filteredSchools.map(s => (
+              {schoolsLoading && (
+                <div style={{padding:"16px",textAlign:"center",color:"#9A7060",fontSize:"0.88rem"}}>
+                  🔍 Searching schools...
+                </div>
+              )}
+              {!schoolsLoading && filteredSchools.map(s => (
                 <div key={s}
                   className={`mk-school-item ${form.school === s ? "selected" : ""}`}
                   onClick={() => { set("school", s); setErrors({}); }}
@@ -564,9 +573,9 @@ export default function Mealkart() {
                   🏫 {s}
                 </div>
               ))}
-              {filteredSchools.length === 0 && (
+              {!schoolsLoading && filteredSchools.length === 0 && (
                 <div style={{padding:"20px",color:"#9A7060",textAlign:"center",fontSize:"0.88rem"}}>
-                  No schools found. Try a different search.
+                  {schoolSearch ? "No schools found. Try a different search." : "Loading schools..."}
                 </div>
               )}
             </div>

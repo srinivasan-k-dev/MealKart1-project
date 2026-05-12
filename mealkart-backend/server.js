@@ -152,21 +152,35 @@ app.post("/api/send-otp", async (req, res) => {
     return res.json({ success: true, otp });
   }
 
-  // Production — send via SMS (works on ALL numbers, no sandbox needed)
-  const smsResult = await sendSMS(phone,
-    `Your Mealkart OTP is ${otp}. Valid for 10 minutes. Do not share with anyone.`
-  );
-
-  if (smsResult.success) {
-    return res.json({ success: true });
+  // Production — send via Fast2SMS (works on ALL Indian numbers, no sandbox)
+  try {
+    const smsRes = await fetch("https://www.fast2sms.com/dev/bulkV2", {
+      method: "POST",
+      headers: { "authorization": process.env.FAST2SMS_API_KEY },
+      body: new URLSearchParams({
+        route:    "q",          // transactional (DLT-approved) route
+        message:  `Your Mealkart OTP is ${otp}. Valid for 10 minutes. Do not share with anyone.`,
+        language: "english",
+        flash:    "0",
+        numbers:  phone,
+      }),
+    });
+    const smsData = await smsRes.json();
+    if (smsData.return === true) {
+      console.log("✅ OTP SMS sent via Fast2SMS to", phone);
+      return res.json({ success: true });
+    }
+    console.error("❌ Fast2SMS error:", JSON.stringify(smsData));
+  } catch (err) {
+    console.error("❌ Fast2SMS exception:", err.message);
   }
 
-  // SMS failed — fall back to showing OTP on screen
-  console.error("❌ SMS failed, returning OTP as fallback");
+  // Fallback — show OTP on screen if SMS fails
+  console.warn("⚠ SMS failed — returning OTP as fallback");
   return res.json({
     success: true,
     otp,
-    warning: "SMS could not be sent. OTP shown on screen.",
+    warning: "SMS could not be sent. OTP shown on screen as fallback.",
   });
 });
 
@@ -583,6 +597,21 @@ app.get("/api/orders/track", async (req, res) => {
 });
 
 // ============================================================
+// ─── 15b. SCHOOLS SEARCH (from Supabase)
+// ============================================================
+app.get("/api/schools", async (req, res) => {
+  const search = (req.query.search || "").trim();
+  let query = supabase.from("schools").select("name, area").order("name");
+  if (search) {
+    query = query.ilike("name", `%${search}%`);
+  }
+  query = query.limit(50);
+  const { data, error } = await query;
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ schools: (data || []).map(s => s.name) });
+});
+
+// ============================================================
 // ─── START
 // ============================================================
 const PORT = process.env.PORT || 5000;
@@ -599,6 +628,7 @@ app.listen(PORT, () => {
   console.log(`   GET  /api/admin/orders`);
   console.log(`   GET  /api/admin/orders/today`);
   console.log(`   GET  /api/admin/summary`);
+  console.log(`   GET  /api/schools           (school search)`);
   console.log(`   GET  /api/admin/download\n`);
 });
 
